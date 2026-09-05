@@ -18,6 +18,10 @@ const SKILL_LINE_LIMIT = 500;
 const NAME_LIMIT = 64;
 const DESCRIPTION_LIMIT = 1024;
 const REFERENCE_PATH_PATTERN = /\breferences\/([A-Za-z0-9._-]+\.md)\b/g;
+// The heading of the section where SKILL.md routes a situation to the
+// reference file that covers it.
+const ROUTING_SECTION_PATTERN =
+  /^(#{1,6})\s+(?:\d+\.\s+)?Conditional references\s*$/i;
 const IS_GITHUB_ACTIONS = process.env.GITHUB_ACTIONS === "true";
 
 // Set by validateRepository for the duration of one run, so the helpers
@@ -137,6 +141,53 @@ function findSkillDirectories() {
   return skillDirectories.sort();
 }
 
+// The routing section as a [start, end) line range, or null when the skill
+// has no such section. Scoping the mention set to this range is what makes
+// a reference named only in passing prose count as unrouted.
+//
+// Fenced lines are skipped at both ends: a `# comment` inside a fenced
+// example is not the next heading, and a heading shown inside a fenced
+// example is not the section.
+function findRoutingSection(lines) {
+  let inFence = false;
+  let start = -1;
+  let depth = 0;
+
+  for (const [index, line] of lines.entries()) {
+    if (/^\s*```/.test(line)) {
+      inFence = !inFence;
+      continue;
+    }
+
+    if (inFence) {
+      continue;
+    }
+
+    if (start === -1) {
+      const opening = ROUTING_SECTION_PATTERN.exec(line);
+
+      if (opening !== null) {
+        start = index;
+        depth = opening[1].length;
+      }
+
+      continue;
+    }
+
+    const heading = /^(#{1,6})\s+/.exec(line);
+
+    if (heading !== null && heading[1].length <= depth) {
+      return [start, index];
+    }
+  }
+
+  return start === -1 ? null : [start, lines.length];
+}
+
+function inSection(range, index) {
+  return range === null || (index >= range[0] && index < range[1]);
+}
+
 function validateSkill(skillDirectory, documentsBySkill) {
   const skillFile = path.join(skillDirectory, "SKILL.md");
   const lines = readLines(skillFile);
@@ -206,17 +257,32 @@ function validateSkill(skillDirectory, documentsBySkill) {
 
   // Every `references/<file>.md` path, wherever it is written, must resolve.
   // SKILL.md routes to the references; the references point at each other.
+  // Only the routing section counts as routing, so a reference the section
+  // forgets is caught even when the body names it somewhere else.
+  const routingSection = findRoutingSection(lines);
   const mentionedInSkill = new Set();
 
   for (const filePath of documentFiles(skillDirectory)) {
     const documentLines =
       filePath === skillFile ? lines : readLines(filePath);
+    let inFence = false;
 
     for (const [index, line] of documentLines.entries()) {
+      if (/^\s*```/.test(line)) {
+        inFence = !inFence;
+        continue;
+      }
+
       for (const match of line.matchAll(REFERENCE_PATH_PATTERN)) {
         const referenceName = match[1];
 
-        if (filePath === skillFile) {
+        // A path written in a fenced example still has to resolve, but an
+        // example is not a rule that routes a situation to the file.
+        if (
+          filePath === skillFile &&
+          !inFence &&
+          inSection(routingSection, index)
+        ) {
           mentionedInSkill.add(referenceName);
         }
 
@@ -237,8 +303,8 @@ function validateSkill(skillDirectory, documentsBySkill) {
     }
   }
 
-  // A reference SKILL.md never names is dead weight: it ships with the
-  // package but no routing rule can reach it.
+  // A reference the routing section never names is dead weight: it ships
+  // with the package but no routing rule can reach it.
   const referencesDirectory = path.join(skillDirectory, "references");
 
   if (statSync(referencesDirectory, { throwIfNoEntry: false })?.isDirectory()) {
@@ -246,7 +312,10 @@ function validateSkill(skillDirectory, documentsBySkill) {
       if (entry.endsWith(".md") && !mentionedInSkill.has(entry)) {
         recordError(
           path.join(referencesDirectory, entry),
-          `references/${entry} is never mentioned in SKILL.md`,
+          routingSection === null
+            ? `references/${entry} is never mentioned in SKILL.md`
+            : `references/${entry} is not routed from the ` +
+              `"Conditional references" section of SKILL.md`,
         );
       }
     }
@@ -273,8 +342,10 @@ const HEADING_PATTERN = /^#{1,6}\s+(.+?)\s*$/;
 const BOLD_LABEL_PATTERN = /^\s*(?:[-*>]\s+|\d+\.\s+)?\*\*(.+?)(?:\*\*|$)/;
 const SKILL_SCOPED_TOKEN_PATTERN =
   /\b(Sections?|Rules?)\s+(\d+(?:-\d+)?(?:(?:,\s*|,?\s+and\s+)\d+(?:-\d+)?)*)\b/g;
+// Ids are a single letter or a run of digits, so a package that reaches
+// Step 10 keeps being checked instead of silently dropping out.
 const PACKAGE_SCOPED_TOKEN_PATTERN =
-  /\b(Steps?|Strateg(?:y|ies)|Snapshots?|Parts?|Questions?)\s+([A-Z0-9](?:(?:,\s*|,?\s+and\s+)[A-Z0-9])*)\b/g;
+  /\b(Steps?|Strateg(?:y|ies)|Snapshots?|Parts?|Questions?)\s+((?:[A-Z]|\d+)(?:(?:,\s*|,?\s+and\s+)(?:[A-Z]|\d+))*)\b/g;
 const NAMED_RULE_PATTERN = /\bthe ((?:[a-z@][\w@/-]*\s+){1,3}rule)\b/gi;
 const QUOTED_PHRASE_PATTERN = /'([^']+)'|"([^"]+)"/g;
 
@@ -327,7 +398,7 @@ function collectAnchors(lines) {
     }
 
     const scoped = text.match(
-      /^(Step|Strategy|Snapshot|Part|Question)\s+([A-Z0-9])\b/,
+      /^(Step|Strategy|Snapshot|Part|Question)\s+([A-Z]|\d+)\b/,
     );
 
     if (scoped !== null) {
@@ -602,7 +673,7 @@ function validateEvals(documentsBySkill) {
     return;
   }
 
-  const cases = parsed.cases;
+  const cases = parsed?.cases;
 
   if (!Array.isArray(cases) || cases.length === 0) {
     recordError(evalsFile, "must contain a non-empty cases array");

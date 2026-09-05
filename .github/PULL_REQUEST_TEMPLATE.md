@@ -8,6 +8,5 @@ Closes # <!-- Optional -->
 
 ## Checklist
 
-- [ ] `node .github/scripts/validate-skills.mjs` passes locally.
-- [ ] If a reference file was added, renamed, moved, removed, or split, the `Conditional references` section in `SKILL.md` was updated.
+- [ ] If AI was used to create or modify this PR, I reviewed and verified the resulting changes.
 - [ ] If validation behavior was changed, the validation rules in the README were updated accordingly.

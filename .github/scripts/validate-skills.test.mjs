@@ -15,6 +15,7 @@ const SKILL = "feature-sliced-design/SKILL.md";
 const ASSETS = "feature-sliced-design/references/asset-handling.md";
 const AUTH = "feature-sliced-design/references/auth-and-api.md";
 const CASES = "evals/cases.json";
+const LINE_LIMIT = 500;
 
 function problemsAfter(mutate) {
   const dir = mkdtempSync(path.join(tmpdir(), "validate-skills-"));
@@ -43,6 +44,18 @@ function replaceIn(dir, relativePath, from, to) {
 function appendTo(dir, relativePath, text) {
   const filePath = path.join(dir, relativePath);
   writeFileSync(filePath, readFileSync(filePath, "utf8") + text);
+}
+
+function bodyLineCount(dir) {
+  const lines = readFileSync(path.join(dir, SKILL), "utf8")
+    .replace(/\r\n?/g, "\n")
+    .split("\n");
+
+  if (lines.at(-1) === "") {
+    lines.pop();
+  }
+
+  return lines.length - (lines.indexOf("---", 1) + 1);
 }
 
 function setRuleOfFirstCase(dir, rule) {
@@ -136,19 +149,115 @@ test("a reference file pointing at a missing sibling is reported", () => {
   assertOneProblemMatching(problems, /references\/gone\.md does not exist/);
 });
 
-test("a reference SKILL.md never mentions is reported as orphaned", () => {
+test("a reference the routing section never names is reported as orphaned", () => {
   const problems = problemsAfter((dir) =>
     writeFileSync(
       path.join(dir, "feature-sliced-design/references/orphan.md"),
       "# Orphan\n",
     ),
   );
-  assertOneProblemMatching(problems, /references\/orphan\.md is never mentioned in SKILL\.md/);
+  assertOneProblemMatching(problems, /references\/orphan\.md is not routed from/);
+});
+
+// The case the checklist used to ask a human to catch: the file is named in
+// the body, so it is not orphaned, but no rule routes a situation to it.
+test("a reference named only outside the routing section is reported", () => {
+  const problems = problemsAfter((dir) => {
+    writeFileSync(
+      path.join(dir, "feature-sliced-design/references/prose-only.md"),
+      "# Prose only\n",
+    );
+    replaceIn(
+      dir,
+      SKILL,
+      "## 10. Conditional references",
+      "The rest is in `references/prose-only.md`.\n\n## 10. Conditional references",
+    );
+  });
+  assertOneProblemMatching(problems, /references\/prose-only\.md is not routed from/);
+});
+
+// The rule degrades rather than misfiring: a skill that organizes its
+// routing differently keeps the older "mentioned anywhere" check.
+test("a skill with no routing section falls back to any mention", () => {
+  const problems = problemsAfter((dir) =>
+    replaceIn(dir, SKILL, "## 10. Conditional references", "## 10. Reference routing"),
+  );
+  assert.deepEqual(problems, []);
+});
+
+// Both ends of the routing section ignore fenced lines, so a code example
+// can neither cut the section short nor impersonate its heading.
+test("a fenced comment inside the routing section does not end it", () => {
+  const problems = problemsAfter((dir) =>
+    replaceIn(
+      dir,
+      SKILL,
+      "- **When resolving cross-import issues**",
+      "```bash\n# install the CLI first\nnpx skills add .\n```\n\n- **When resolving cross-import issues**",
+    ),
+  );
+  assert.deepEqual(problems, []);
+});
+
+test("a routing heading shown inside a fence is not the section", () => {
+  const problems = problemsAfter((dir) =>
+    replaceIn(
+      dir,
+      SKILL,
+      "## 1. Core philosophy & layer overview",
+      "```markdown\n## Conditional references\n```\n\n## 1. Core philosophy & layer overview",
+    ),
+  );
+  assert.deepEqual(problems, []);
+});
+
+test("a null eval document is reported instead of crashing", () => {
+  const problems = problemsAfter((dir) =>
+    writeFileSync(path.join(dir, CASES), "null\n"),
+  );
+  assertOneProblemMatching(problems, /must contain a non-empty cases array/);
+});
+
+// Ids past one digit used to match nothing at all, so a dangling reference
+// to Step 10 passed while Step 9 was caught.
+test("a package token with two digits is checked", () => {
+  const problems = problemsAfter((dir) =>
+    appendTo(dir, ASSETS, "\nSee Step 10.\n"),
+  );
+  assertOneProblemMatching(problems, /"step 10" does not match/);
+});
+
+test("a package token with two digits resolves to its anchor", () => {
+  const problems = problemsAfter((dir) =>
+    appendTo(dir, ASSETS, "\n### Step 10. Ship it\n\nSee Step 10.\n"),
+  );
+  assert.deepEqual(problems, []);
+});
+
+// Padding is measured against the live document, so the boundary stays
+// pinned whether SKILL.md grows or shrinks.
+test("a reference named only inside a fence is not routed", () => {
+  const problems = problemsAfter((dir) => {
+    writeFileSync(
+      path.join(dir, "feature-sliced-design/references/fenced.md"),
+      "# Fenced\n",
+    );
+    appendTo(dir, SKILL, "\n```text\nreferences/fenced.md\n```\n");
+  });
+  assertOneProblemMatching(problems, /references\/fenced\.md is not routed from/);
+});
+
+test("a SKILL.md body one line under the limit passes", () => {
+  const problems = problemsAfter((dir) =>
+    appendTo(dir, SKILL, "Padding.\n".repeat(LINE_LIMIT - 1 - bodyLineCount(dir))),
+  );
+  assert.deepEqual(problems, []);
 });
 
 test("a SKILL.md body at the line limit is reported", () => {
   const problems = problemsAfter((dir) =>
-    appendTo(dir, SKILL, "\nPadding.\n".repeat(10)),
+    appendTo(dir, SKILL, "Padding.\n".repeat(LINE_LIMIT - bodyLineCount(dir))),
   );
   assertOneProblemMatching(problems, /must stay under 500 lines/);
 });
